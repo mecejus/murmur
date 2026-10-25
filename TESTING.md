@@ -10,7 +10,7 @@ with an Apple M1 and 8 GB of RAM, running macOS 26.6.2. murmur used
 scripts/swift.sh test
 ```
 
-**55 tests in 11 suites, all passing** (about 15 s). The integration tests use
+**60 tests in 12 suites, all passing** (about 15 s). The integration tests use
 `ggml-tiny.bin` and speech generated with macOS `say`, so no microphone is
 needed.
 
@@ -25,6 +25,7 @@ needed.
 | FnTrackerTests | fn edges, other keys ignored, resync releases a key-up lost while the tap was disabled |
 | TextTests | WER, non-speech annotation stripping, decoder-loop detection |
 | BufferTests | fixed-capacity buffer, fixed-size pool, process stats |
+| PasteTests | against a private pasteboard: an app that reads 600 ms late still pastes the dictation (not the old clipboard), the clipboard is restored right after the read, restored after a timeout when nothing reads, a copy made during the paste is kept, a failed keystroke restores and errors |
 | PipelineTests | the real pipeline with a scriptable fake model (see faults below) |
 | IntegrationTests | the real pipeline with whisper.cpp (see below) |
 

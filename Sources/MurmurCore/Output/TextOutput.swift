@@ -21,38 +21,88 @@ public enum OutputError: Error, CustomStringConvertible {
     }
 }
 
-/// Pastes into the focused app: put the text (plus a
-/// trailing space, so consecutive dictations don't run together) on the
-/// pasteboard, post Cmd+V, then put back what the pasteboard held before.
-/// Needs Accessibility access for the keystroke.
+/// Pastes into the focused app: put the text (plus a trailing space, so
+/// consecutive dictations don't run together) on the pasteboard, post Cmd+V,
+/// then put back what the pasteboard held before. Needs Accessibility access
+/// for the keystroke.
+///
+/// Cmd+V is asynchronous: the app reads the pasteboard whenever it gets to
+/// the keystroke. Restoring on a fixed timer (it used to be 150 ms) lost
+/// that race whenever the app was busy, and the app pasted the *previous*
+/// clipboard instead of the dictation. So the text is put on the pasteboard
+/// as a promise: the pasteboard asks us for the data at the moment someone
+/// reads it, which tells us the paste has happened. The old contents go
+/// back a short grace period after that read, or after `maxWait` if nothing
+/// reads it at all (no text field focused).
 public final class PasteOutput: TextOutput {
-    /// How long the focused app gets to read the pasteboard before the
-    /// previous contents are restored. Cmd+V is asynchronous.
-    let restoreDelay: TimeInterval
+    let pasteboard: NSPasteboard
+    let postKeystroke: () -> Bool
+    /// After the first read, how long before restoring, so an app that reads
+    /// in more than one step finishes with our text.
+    let grace: TimeInterval
+    /// Longest wait for a read before restoring anyway.
+    let maxWait: TimeInterval
 
-    public init(restoreDelay: TimeInterval = 0.15) {
-        self.restoreDelay = restoreDelay
+    public init(pasteboard: NSPasteboard = .general, grace: TimeInterval = 0.2, maxWait: TimeInterval = 3,
+                postKeystroke: @escaping () -> Bool = PasteOutput.postCmdV) {
+        self.pasteboard = pasteboard
+        self.grace = grace
+        self.maxWait = maxWait
+        self.postKeystroke = postKeystroke
     }
 
     public func deliver(_ text: String) throws -> DispatchTime {
         guard !text.isEmpty else { return .now() }
         return try autoreleasepool {
-            let pb = NSPasteboard.general
+            let pb = pasteboard
             let saved = Self.snapshot(pb)
+            let promise = Promise(text + " ")
+            let item = NSPasteboardItem()
             pb.clearContents()
-            guard pb.setString(text + " ", forType: .string) else { throw OutputError.pasteboardWrite }
+            guard item.setDataProvider(promise, forTypes: [.string]), pb.writeObjects([item]) else {
+                Self.restore(pb, saved)
+                throw OutputError.pasteboardWrite
+            }
             let ourChange = pb.changeCount
 
-            guard Self.postCmdV() else {
+            guard postKeystroke() else {
                 Self.restore(pb, saved)
                 throw OutputError.keystroke
             }
             let posted = DispatchTime.now()
-            Thread.sleep(forTimeInterval: restoreDelay)
+            if promise.waitForRead(timeout: maxWait) {
+                Thread.sleep(forTimeInterval: grace)
+            } else {
+                log.warn("paste_not_read", ["waited_s": maxWait, "hint": "no text field focused?"])
+            }
             // If something else wrote the pasteboard meanwhile (the user
             // copied), leave theirs alone.
             if pb.changeCount == ourChange { Self.restore(pb, saved) }
             return posted
+        }
+    }
+
+    /// Supplies the text when the pasteboard is read, and reports that read.
+    final class Promise: NSObject, NSPasteboardItemDataProvider, @unchecked Sendable {
+        let text: String
+        private let read = DispatchSemaphore(value: 0)
+        private let lock = NSLockLite()
+        private var signalled = false
+
+        init(_ text: String) { self.text = text }
+
+        func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem,
+                        provideDataForType type: NSPasteboard.PasteboardType) {
+            item.setString(text, forType: type)
+            let first = lock.locked { () -> Bool in
+                defer { signalled = true }
+                return !signalled
+            }
+            if first { read.signal() }
+        }
+
+        func waitForRead(timeout: TimeInterval) -> Bool {
+            read.wait(timeout: .now() + timeout) == .success
         }
     }
 
@@ -90,7 +140,7 @@ public final class PasteOutput: TextOutput {
         pb.writeObjects(items)
     }
 
-    static func postCmdV() -> Bool {
+    public static func postCmdV() -> Bool {
         let src = CGEventSource(stateID: .hidSystemState)
         guard let down = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true),
               let up = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false) else { return false }
