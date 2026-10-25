@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+*.o
+/bench/audio/
+/bench/out/

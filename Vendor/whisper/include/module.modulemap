@@ -1,0 +1,5 @@
+module CWhisper {
+    header "whisper.h"
+    header "ggml-backend.h"
+    export *
+}
